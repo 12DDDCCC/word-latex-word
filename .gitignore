@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+_pytest_tmp/
+_tex2word_work/
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+*.toc
+
+# Generated outputs and local scratch
+output/
+outputs/
+tmp/
+temp/
+*.tmp
+~$*
+
