@@ -279,22 +279,6 @@ python orchestrator.py input.docx template/ references.bib copernicus output/ --
 | final 模式跨栏图片四周环绕 | ✓ |
 | 数字型参考文献 `[n]` 回填 | ✓ |
 
-## 测试
-
-推荐在发布前运行：
-
-```bash
-python -m py_compile orchestrator.py tex-to-word/tex_to_word.py tex-to-word/_pdf_float_wrap.py
-python -m pytest test_orchestrator_contract.py -k "pdf_float_wrap or generated_references"
-```
-
-使用真实输入和模板时，示例命令：
-
-```bash
-python orchestrator.py "输入/小论文.docx" "目标模板/NSR/NSR_Author" "输入/references.bib" NSR "output/nsr_final" --config-mode final
-```
-
-## 注意事项
 
 - 编译目录中应保留期刊 `.cls`、`.bst`、`.sty`、`.cfg` 等模板支撑文件。
 - 最终 Word 视觉效果仍受 Word 排版引擎影响，建议对关键期刊模板进行一次人工打开检查。
