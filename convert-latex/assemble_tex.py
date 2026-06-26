@@ -873,6 +873,46 @@ def _apply_spec_to_preamble(preamble, spec, layout_spec, spec_pkgs):
 
     return preamble
 
+
+def _split_affiliation_marker(affil_text):
+    text = (affil_text or '').strip()
+    patterns = [
+        r'^\$\s*\^\{([^{}]+)\}\s*\\mathrm\{([^{}]*)\}\s*\$\s*(.*)$',
+        r'^\\textsuperscript\{([^{}]+)\}\s*(.*)$',
+        r'^\$\s*\^\{([^{}]+)\}\s*\$\s*(.*)$',
+        r'^\$\s*\^([^{}\s$]+)\s*\$\s*(.*)$',
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, text)
+        if match:
+            if len(match.groups()) == 3:
+                return match.group(1).strip(), f'{match.group(2).strip()} {match.group(3).strip()}'.strip()
+            return match.group(1).strip(), match.group(2).strip()
+    return '', text
+
+
+def _format_affiliation_command(affil_text, template_result):
+    journal = str(template_result.get('journal', '') or '').lower()
+    class_name = str(
+        (((template_result.get('spec') or {}).get('document_class') or {}).get('class_name'))
+        or ''
+    ).lower()
+    label, body = _split_affiliation_marker(affil_text)
+    body = body or affil_text.strip()
+
+    if journal == 'elsarticle' or class_name == 'elsarticle':
+        if label:
+            return f'\\affiliation[{label}]{{organization={{{body}}}}}'
+        return f'\\affiliation{{organization={{{body}}}}}'
+
+    if journal == 'nsr' or class_name == 'nsr':
+        if label:
+            return f'\\affil{{$^{{{label}}}${body}}}'
+        return f'\\affil{{{body}}}'
+
+    return f'\\affil[]{{{affil_text.strip()}}}'
+
+
 def _assemble_metadata(full_tex, template_result, template_content,
                        paragraphs, title_para, author_paras, affil_paras,
                        skeleton_info, spec, layout_spec):
@@ -911,6 +951,60 @@ def _assemble_metadata(full_tex, template_result, template_content,
                 meta_lines.append('')
             if _author_paras:
                 author_text = ' '.join(p.get('latex', p['text']) for p in _author_paras)
+
+                # 修复作者信息的LaTeX格式
+                # 将 $ \mathrm{X}^{Y} $ 格式转换为 X$^{Y}$ 格式
+                def _fix_author_latex(text):
+                    return re.sub(
+                        r'\$\s*\\mathrm\{([^{}]+)\}\s*\^\{([^{}]+)\}\s*\$',
+                        lambda match: f'{match.group(1)}$^{{{match.group(2)}}}$',
+                        text,
+                    )
+                    # 使用字符串替换方法，避免正则表达式问题
+                    result = text
+                    # 查找所有 $ \mathrm{X}^{Y} $ 模式
+                    while '$ \\mathrm{' in result and '}^{ ' in result:
+                        # 找到 $ \mathrm{ 的位置
+                        start = result.find('$ \\mathrm{')
+                        if start == -1:
+                            break
+                        # 找到对应的 } 的位置
+                        brace_start = start + len('$ \\mathrm{')
+                        brace_count = 1
+                        pos = brace_start
+                        while pos < len(result) and brace_count > 0:
+                            if result[pos] == '{':
+                                brace_count += 1
+                            elif result[pos] == '}':
+                                brace_count -= 1
+                            pos += 1
+                        # 提取内容
+                        content = result[brace_start:pos-1]
+                        # 查找 ^{ 的位置
+                        sup_start = result.find('^{ ', pos)
+                        if sup_start == -1:
+                            break
+                        # 找到对应的 } 的位置
+                        sup_brace_start = sup_start + 3
+                        brace_count = 1
+                        pos = sup_brace_start
+                        while pos < len(result) and brace_count > 0:
+                            if result[pos] == '{':
+                                brace_count += 1
+                            elif result[pos] == '}':
+                                brace_count -= 1
+                            pos += 1
+                        # 提取上标
+                        superscript = result[sup_brace_start:pos-1]
+                        # 构建新的格式
+                        new_format = f'{content}$^{{{superscript}}}$'
+                        # 替换原来的格式（包括周围的 $ 符号）
+                        old_format = result[start:pos+2]  # +2 是为了包含最后的 $ 和空格
+                        result = result.replace(old_format, new_format, 1)
+                    return result
+
+                author_text = _fix_author_latex(author_text)
+
                 parts = author_text.split()
                 given, surname = '', ''
                 if len(parts) == 1:
@@ -924,8 +1018,9 @@ def _assemble_metadata(full_tex, template_result, template_content,
                     meta_lines.append(f'\\author{{{author_text}}}')
                 meta_lines.append('')
             if affil_paras:
-                affil_text = ' '.join(p['latex'] for p in affil_paras)
-                meta_lines.append(f'\\affil[]{{{affil_text}}}')
+                for affil_p in affil_paras:
+                    affil_text = affil_p['latex'].strip()
+                    meta_lines.append(_format_affiliation_command(affil_text, template_result))
                 meta_lines.append('')
             tmpl = (template_result.get('spec', {}) or {}).get('template_specific', {})
             if _title_para and tmpl.get('runningtitle', {}).get('exists'):
@@ -937,7 +1032,12 @@ def _assemble_metadata(full_tex, template_result, template_content,
                 running_author = _author_paras[0]['text'].strip()
                 meta_lines.append(f'\\runningauthor{{{running_author}}}')
             if tmpl.get('correspondence', {}).get('exists'):
-                meta_lines.append('\\correspondence{[EMAIL PLACEHOLDER]}')
+                # 从段落中提取真实邮箱地址
+                email_addr = _extract_correspondence_email(paragraphs)
+                if email_addr:
+                    meta_lines.append(f'\\correspondence{{{email_addr}}}')
+                else:
+                    meta_lines.append('\\correspondence{[EMAIL PLACEHOLDER]}')
             meta_lines.append('')
             full_tex = full_tex.replace('\\maketitle', '\n'.join(meta_lines) + '\\maketitle')
     elif template_content:
@@ -965,7 +1065,7 @@ def _assemble_metadata(full_tex, template_result, template_content,
         full_tex = full_tex.replace('\\Author[]{given_name}{surname}', f"\\Author[]{{{given}}}{{{surname}}}")
         full_tex = full_tex.replace('\\Author[][EMAIL]{given_name}{surname}', f"\\Author[][EMAIL]{{{given}}}{{{surname}}}")
         full_tex = re.sub(
-            r'\\author\{[^}]*\}',
+            r'\\author\{\s*(?:AUTHOR(?:\s+NAME)?|TEXT|NAME)?\s*\}',
             lambda _match: f'\\author{{{author_names}}}',
             full_tex,
         )
@@ -974,8 +1074,14 @@ def _assemble_metadata(full_tex, template_result, template_content,
     full_tex = re.sub(r'\\Author\[\]\[EMAIL\]\{given_name\}\{surname\}\s*%%.*$', '', full_tex, flags=re.MULTILINE)
 
     if affil_paras:
-        affil_text = ' '.join(p['latex'] for p in affil_paras)
-        full_tex = full_tex.replace('\\affil[]{ADDRESS}', f"\\affil[]{{{affil_text}}}")
+        # 逐个替换 \affil[]{ADDRESS} 占位符，每个机构独立一行
+        for affil_p in affil_paras:
+            affil_text = affil_p['latex'].strip()
+            full_tex = full_tex.replace(
+                '\\affil[]{ADDRESS}',
+                _format_affiliation_command(affil_text, template_result),
+                1,
+            )
 
     full_tex = full_tex.replace('\\affil[]{ADDRESS}', "\\affil[]{[AFFILIATION PLACEHOLDER]}")
     full_tex = full_tex.replace('\\affil[]{}', "\\affil[]{[AFFILIATION PLACEHOLDER]}")
@@ -998,6 +1104,69 @@ def _assemble_metadata(full_tex, template_result, template_content,
     full_tex = full_tex.replace('\\correspondence{}', "\\correspondence{[EMAIL PLACEHOLDER]}")
 
     return full_tex
+
+
+def _extract_correspondence_email(paragraphs):
+    """从段落中提取通讯作者邮箱地址
+
+    按用户要求：找到文本中包含 'Correspondence' 的段落，
+    从该段落的 runs 中拼接出完整邮箱。
+    Word常把邮箱拆成多个run: jf / bb / @ / bbj，需要拼接还原。
+    """
+    import re as _re
+
+    for p in paragraphs:
+        text = p.get('text', '')
+        latex = p.get('latex', '')
+
+        if 'correspondence' not in text.lower():
+            continue
+
+        # 策略1: 从 latex 中提取 mailto: 链接
+        mailto_m = _re.search(r'mailto:([^}\s\\]+)', latex)
+        if mailto_m:
+            return mailto_m.group(1)
+
+        # 策略2: 从 runs 拼接还原邮箱
+        # Word可能把邮箱拆成多个run: ['jf', 'bb', '@', 'bbj']
+        # 找到含@的run，然后向前后收集相邻的run拼出完整邮箱
+        runs = p.get('runs', [])
+        run_texts = [r.get('text', '') for r in runs]
+        for ri, rt in enumerate(run_texts):
+            if '@' not in rt:
+                continue
+            # 找到含@的run，向前收集（到空格/括号为止）
+            prefix = ''
+            for j in range(ri - 1, -1, -1):
+                t = run_texts[j].strip()
+                if not t or t in ('(', ')', ' '):
+                    break
+                prefix = t + prefix
+            # 向后收集
+            suffix = ''
+            for j in range(ri + 1, len(run_texts)):
+                t = run_texts[j].strip()
+                if not t or t in ('(', ')', ' '):
+                    break
+                suffix += t
+            candidate = prefix + rt.strip() + suffix
+            # 验证是否像邮箱（含@）
+            if '@' in candidate and len(candidate) > 3:
+                # 去除首尾括号
+                candidate = candidate.strip('() ')
+                return candidate
+
+        # 策略3: 从 text 整体提取含 @ 的字符串
+        email_m = _re.search(r'[\w.+-]+@[\w.-]+', text)
+        if email_m:
+            return email_m.group(0)
+
+        # 策略4: 从 latex 中提取含 @ 的字符串
+        email_m = _re.search(r'[\w.+-]+@[\w.-]+', latex)
+        if email_m:
+            return email_m.group(0)
+
+    return None
 
 
 def _insert_abstract_keywords(full_tex, abstract_lines, keywords_lines,

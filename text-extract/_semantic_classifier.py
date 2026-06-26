@@ -21,10 +21,22 @@ _RE_DECLARATION = re.compile(
     r'Author\s*contribution|Sample\s*availability|Copyright)',
     re.IGNORECASE
 )
-_RE_AFFILIATION = re.compile(r'大学|学院|研究所|研究院|University|Institute|Laboratory|Lab\b', re.IGNORECASE)
+_RE_AFFILIATION = re.compile(
+    r'大学|学院|研究所|研究院|气象局|科学院|中心|'
+    r'University|Institute|Laboratory|Lab\b|Center|Centre|Bureau|'
+    r'Department|Observatory|Agency|Authority|Office|College|School\b',
+    re.IGNORECASE)
+
+# 通讯作者模式（用于识别 correspondence 段落）
+_RE_CORRESPONDENCE = re.compile(
+    r'^\s*(?:Correspondence|通讯作者|联系人|Corresponding\s*author)\s*[:：.]?\s*',
+    re.IGNORECASE
+)
+_RE_EMAIL = re.compile(r'[\w.-]+@[\w.-]+\.\w+')
 
 # 机构关键词（用于识别 affiliation 段落）
-_AFFIL_KEYWORDS = ('大学', '学院', '研究所', '研究院', 'University', 'Institute', 'Laboratory')
+_AFFIL_KEYWORDS = ('大学', '学院', '研究所', '研究院', '气象局', '科学院', '中心',
+                   'University', 'Institute', 'Laboratory', 'Center', 'Centre', 'Bureau')
 
 
 def _dominant_size(runs):
@@ -152,21 +164,42 @@ def classify_semantic_type(para_info, index, total, prev_type=None, doc_meta=Non
             return 'abstract'
 
     # ── 优先级3: 格式+位置启发式 ──
-    # 标题：前5段 + 居中 + 全部加粗 + 长度>5
-    if index < 5 and align == 'center' and all_bold and len(text) > 5:
+    # 标题：前5段 + 居中 + 长度>5（放宽条件：不要求全部加粗）
+    if index < 5 and align == 'center' and len(text) > 5:
         if not doc_meta.get('title_found'):
             doc_meta['title_found'] = True
             return 'title'
 
-    # 作者：标题之后(前15段) + 居中 + 短文本(<50字) + 非加粗
+    # 作者：标题之后(前15段) + 居中 + 短文本(<100字)
     if (doc_meta.get('title_found') and not doc_meta.get('author_done')
-            and index < 15 and align == 'center' and not all_bold
-            and len(text) < 50 and len(text) > 1
+            and index < 15 and align == 'center'
+            and len(text) < 100 and len(text) > 1
             and not _RE_AFFILIATION.search(text)):
         return 'author'
 
+    # 通讯作者：包含"Correspondence:"或"通讯作者"或邮箱地址
+    if _RE_CORRESPONDENCE.match(text) or _RE_EMAIL.search(text):
+        return 'correspondence'
+
     # 机构：居中 + 含机构关键词
     if align == 'center' and _RE_AFFILIATION.search(text):
+        doc_meta['author_done'] = True
+        return 'affiliation'
+
+    # 机构回退1：字号比正文小 + 含机构关键词 + 短文本（<200字）
+    size = _dominant_size(runs)
+    body_size = _body_font_size(doc_meta)
+    if (size is not None and body_size is not None and size < body_size
+            and len(text) < 200 and _RE_AFFILIATION.search(text)):
+        doc_meta['author_done'] = True
+        return 'affiliation'
+
+    # 机构回退2：字号比正文小 + latex中有上标编号（^{N}格式）
+    # 用于处理Word中上标编号在formula run里、text run只含机构尾部的情况
+    latex = para_info.get('latex', '')
+    if (size is not None and body_size is not None and size < body_size
+            and len(text) < 200
+            and re.search(r'\$\s*\^\{?\d+\}?', latex)):
         doc_meta['author_done'] = True
         return 'affiliation'
 

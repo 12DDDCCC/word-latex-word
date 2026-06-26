@@ -41,6 +41,10 @@ class RuntimeResolutionTest(unittest.TestCase):
         root = Path('C:/Program Files') / 'WinGet' / 'Packages'
         match = root / 'vendor' / 'pandoc.exe'
         result = MODULE.subprocess.CompletedProcess(args=[], returncode=0, stdout='')
+
+        def fake_walk(root_arg, onerror=None):
+            yield str(root / 'vendor'), [], ['pandoc.exe']
+
         with patch.object(MODULE.shutil, 'which', return_value=None), \
                 patch.object(MODULE.os, 'name', 'nt'), \
                 patch.object(MODULE.subprocess, 'run', return_value=result), \
@@ -49,7 +53,7 @@ class RuntimeResolutionTest(unittest.TestCase):
                     'ProgramFiles': 'C:/Program Files',
                 }, clear=True), \
                 patch.object(Path, 'is_dir', return_value=True), \
-                patch.object(Path, 'rglob', return_value=[match]):
+                patch.object(MODULE.os, 'walk', side_effect=fake_walk):
             self.assertEqual(MODULE.find_pandoc(), str(match))
 
 

@@ -1416,7 +1416,7 @@ def _deep_clean_table_cells(doc):
                         if run.text:
                             stripped = run.text.lstrip()
                             # bullet字符：•, (U+00B7), ■, ●, -, *, 以及零宽字符
-                            if stripped and stripped[0] in '•·■●○-*':
+                            if stripped and stripped[0] in '•·■●○*':
                                 run.text = stripped[1:].lstrip()
                                 cleaned += 1
                             break  # 只检查第一个run
@@ -2878,7 +2878,7 @@ def _load_template_word_style(tex_path=None, config_mode=None):
         "main_font": main_font,
         "sans_font": sans_font,
         "mono_font": mono_font,
-        "cjk_font": cjk_font or "宋体",
+        "cjk_font": cjk_font,
         "body_size": body_size,
         "small_size": small_size,
         "abstract_size": abstract_style.get("size"),
@@ -3854,6 +3854,213 @@ def _effective_config_mode_from_tex(tex_path):
     return _word_config_mode(None, opts)
 
 
+def _clean_front_matter_latex_text(text):
+    text = text or ""
+    text = re.sub(
+        r'\$\s*\^\{([^{}]+)\}\s*\\mathrm\{([^{}]*)\}\s*\$',
+        lambda match: f'{match.group(1)} {match.group(2)} ',
+        text,
+    )
+    text = re.sub(r'\\textsuperscript\{([^{}]*)\}', r'\1 ', text)
+    text = re.sub(r'\$\s*\^\{([^{}]+)\}\s*\$', r'\1 ', text)
+    text = re.sub(r'\$\s*\^([^{}\s$]+)\s*\$', r'\1 ', text)
+    text = re.sub(r'\\[a-zA-Z]+\{([^{}]*)\}', r'\1', text)
+    text = text.replace('$', '')
+    text = re.sub(r'[{}]', '', text)
+    text = re.sub(r'\s+([,;:])', r'\1', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+
+def _extract_front_matter_affiliations(tex_content):
+    affil_texts = []
+    seen = set()
+
+    def add(raw):
+        cleaned = _clean_front_matter_latex_text(raw)
+        if cleaned and cleaned not in ('ADDRESS', '[AFFILIATION PLACEHOLDER]') and cleaned not in seen:
+            seen.add(cleaned)
+            affil_texts.append(cleaned)
+
+    for match in re.finditer(
+            r'\\affiliation(?:\[([^\]]*)\])?\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
+            tex_content,
+            re.S):
+        label = (match.group(1) or '').strip()
+        body = match.group(2)
+        org_match = re.search(r'organization\s*=\s*\{([^{}]+)\}', body)
+        raw = org_match.group(1).strip() if org_match else body.strip()
+        if label:
+            raw = f'\\textsuperscript{{{label}}} {raw}'
+        add(raw)
+
+    for match in re.finditer(
+            r'\\affil(?:\[[^\]]*\])?\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}',
+            tex_content,
+            re.S):
+        add(match.group(1))
+
+    return affil_texts
+
+
+def _restore_title_author_affil(doc, tex_content):
+    """从tex中恢复Title、Author、Affiliation到Word文档。
+
+    Pandoc可能无法正确处理Copernicus的\\Author、\\affil等自定义命令，
+    导致Word中缺少这些前置内容。这里从tex中提取并插入到文档开头。
+    """
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    # 检查Word中是否已有Title段落
+    has_title = any(
+        (p.style and p.style.name and 'title' in p.style.name.lower())
+        for p in doc.paragraphs[:5]
+    )
+
+    # 从tex提取title
+    title_m = re.search(r'\\title\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', tex_content)
+    title_text = title_m.group(1).strip() if title_m else ""
+
+    # 从tex提取author（\author{} 或 \Author转换后的\author{}）
+    author_m = re.search(r'\\author\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', tex_content)
+    author_text = author_m.group(1).strip() if author_m else ""
+    # 清理LaTeX命令：去除 \mathrm{} 等，保留文本
+    if author_text:
+        author_text = _clean_front_matter_latex_text(author_text)
+
+    # 从tex提取affiliations
+    affil_matches = re.findall(r'\\affil(?:\[[^\]]*\])?\{([^{}]*(?:\{[^{}]*\}[^{}]*)*)\}', tex_content)
+    affil_texts = []
+    for a in affil_matches:
+        a = a.strip()
+        if a and a not in ('ADDRESS', '[AFFILIATION PLACEHOLDER]'):
+            # 清理LaTeX命令
+            a = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', a)
+            a = re.sub(r'\$\s*', '', a)
+            a = re.sub(r'\s+', ' ', a).strip()
+            if a:
+                affil_texts.append(a)
+
+    affil_texts = _extract_front_matter_affiliations(tex_content)
+
+    if not title_text and not author_text and not affil_texts:
+        return
+
+    # 找到文档的第一个段落（Title位置）
+    first_para = doc.paragraphs[0] if doc.paragraphs else None
+    if first_para is None:
+        return
+
+    insert_before = first_para._element
+    body = insert_before.getparent()
+
+    # 插入Affiliation（在Title之前）
+    for affil_text in []:
+        p = OxmlElement("w:p")
+        pPr = OxmlElement("w:pPr")
+        pStyle = OxmlElement("w:pStyle")
+        pStyle.set(qn("w:val"), "BodyText")
+        pPr.append(pStyle)
+        jc = OxmlElement("w:jc")
+        jc.set(qn("w:val"), "left")
+        pPr.append(jc)
+        ind = OxmlElement("w:ind")
+        ind.set(qn("w:firstLine"), "0")
+        pPr.append(ind)
+        p.append(pPr)
+        run = OxmlElement("w:r")
+        rPr = OxmlElement("w:rPr")
+        sz = OxmlElement("w:sz")
+        sz.set(qn("w:val"), "18")  # 9pt
+        rPr.append(sz)
+        szCs = OxmlElement("w:szCs")
+        szCs.set(qn("w:val"), "18")
+        rPr.append(szCs)
+        run.append(rPr)
+        t = OxmlElement("w:t")
+        t.set(qn("xml:space"), "preserve")
+        t.text = affil_text
+        run.append(t)
+        p.append(run)
+        body.insert(list(body).index(insert_before), p)
+
+    # 插入Author（在Affiliation之前）
+    if author_text and not has_title:
+        p = OxmlElement("w:p")
+        pPr = OxmlElement("w:pPr")
+        pStyle = OxmlElement("w:pStyle")
+        pStyle.set(qn("w:val"), "Author")
+        pPr.append(pStyle)
+        p.append(pPr)
+        run = OxmlElement("w:r")
+        t = OxmlElement("w:t")
+        t.set(qn("xml:space"), "preserve")
+        t.text = author_text
+        run.append(t)
+        p.append(run)
+        body.insert(list(body).index(insert_before), p)
+
+    title_para = next(
+        (p for p in doc.paragraphs[:12]
+         if p.style and p.style.name and 'title' in p.style.name.lower()),
+        None,
+    )
+    author_para = next(
+        (p for p in doc.paragraphs[:12]
+         if p.style and p.style.name and 'author' in p.style.name.lower()),
+        None,
+    )
+    anchor_elem = (
+        author_para._element if author_para is not None
+        else title_para._element if title_para is not None
+        else None
+    )
+
+    existing_front_texts = {
+        (p.text or '').strip() for p in doc.paragraphs[:20]
+    }
+    for affil_text in affil_texts:
+        if affil_text in existing_front_texts:
+            continue
+        p = OxmlElement("w:p")
+        pPr = OxmlElement("w:pPr")
+        pStyle = OxmlElement("w:pStyle")
+        pStyle.set(qn("w:val"), "BodyText")
+        pPr.append(pStyle)
+        jc = OxmlElement("w:jc")
+        jc.set(qn("w:val"), "left")
+        pPr.append(jc)
+        ind = OxmlElement("w:ind")
+        ind.set(qn("w:firstLine"), "0")
+        pPr.append(ind)
+        p.append(pPr)
+        run = OxmlElement("w:r")
+        rPr = OxmlElement("w:rPr")
+        sz = OxmlElement("w:sz")
+        sz.set(qn("w:val"), "18")  # 9pt
+        rPr.append(sz)
+        szCs = OxmlElement("w:szCs")
+        szCs.set(qn("w:val"), "18")
+        rPr.append(szCs)
+        run.append(rPr)
+        t = OxmlElement("w:t")
+        t.set(qn("xml:space"), "preserve")
+        t.text = affil_text
+        run.append(t)
+        p.append(run)
+        if anchor_elem is not None:
+            anchor_elem.addnext(p)
+            anchor_elem = p
+        else:
+            body.insert(list(body).index(insert_before), p)
+            anchor_elem = p
+        existing_front_texts.add(affil_text)
+
+    print(f"  [front matter] restored Title/Author/Affil: title={title_text[:40]}..., "
+          f"author={author_text[:40]}..., affils={len(affil_texts)}")
+
+
 def restore_front_matter_from_tex(docx_path, tex_path):
     """Restore front matter commands from the original .tex file into Word.
 
@@ -3877,6 +4084,9 @@ def restore_front_matter_from_tex(docx_path, tex_path):
     abstract_label, abstract_text = _extract_tex_abstract(tex_content, cls_content)
     if _insert_abstract_before_body(doc, abstract_label, abstract_text):
         print(f"  [front matter] restored Abstract: {abstract_text[:50]}...")
+
+    # 恢复Title（如果Pandoc没有正确转换）
+    _restore_title_author_affil(doc, tex_content)
 
     corr_m = re.search(r"\\correspondence\{([^}]+)\}", tex_content)
     corr_text = corr_m.group(1).strip() if corr_m else ""
@@ -4277,6 +4487,102 @@ def _caption_para_element(kind, number, caption, legend="", caption_style=None, 
     return cap_para
 
 
+def _convert_inline_to_square_wrap(image_elem):
+    """将图片从wp:inline转换为wp:anchor，启用四周环绕(wrapSquare)。
+
+    这样Word中图片会显示为"四周环绕"格式，正文可以环绕在图片周围，
+    避免图片独占一页导致大量空白。
+    """
+    from lxml import etree
+
+    WP_NS = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+    A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+
+    def wp(tag):
+        return f"{{{WP_NS}}}{tag}"
+
+    # 查找 wp:inline 元素
+    for inline in image_elem.iter(wp("inline")):
+        if inline.tag != wp("inline"):
+            continue
+
+        # 保存子元素
+        children = {}
+        for child in list(inline):
+            local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+            children[local] = child
+
+        graphic = None
+        for child in list(inline):
+            if child.tag == f"{{{A_NS}}}graphic":
+                graphic = child
+                break
+
+        if "extent" not in children or "docPr" not in children or graphic is None:
+            continue
+
+        # 转换为 wp:anchor
+        inline.clear()
+        inline.tag = wp("anchor")
+
+        # 设置锚点属性
+        for key, value in {
+            "simplePos": "0",
+            "relativeHeight": "0",
+            "behindDoc": "0",
+            "locked": "0",
+            "layoutInCell": "1",
+            "allowOverlap": "0",
+            "distT": "0",
+            "distB": "0",
+            "distL": "114300",  # 0.2 inch distance
+            "distR": "114300",
+        }.items():
+            inline.set(key, value)
+
+        # 添加 simplePos
+        simple_pos = etree.SubElement(inline, wp("simplePos"))
+        simple_pos.set("x", "0")
+        simple_pos.set("y", "0")
+
+        # 添加 positionH (水平居中)
+        pos_h = etree.SubElement(inline, wp("positionH"))
+        pos_h.set("relativeFrom", "column")
+        align = etree.SubElement(pos_h, wp("align"))
+        align.text = "center"
+
+        # 添加 positionV (段落下)
+        pos_v = etree.SubElement(inline, wp("positionV"))
+        pos_v.set("relativeFrom", "paragraph")
+        offset = etree.SubElement(pos_v, wp("posOffset"))
+        offset.text = "0"
+
+        # 添加 extent
+        inline.append(children["extent"])
+
+        # 添加 effectExtent
+        if "effectExtent" in children:
+            inline.append(children["effectExtent"])
+
+        # 添加 wrapSquare (四周环绕)
+        wrap = etree.SubElement(inline, wp("wrapSquare"))
+        wrap.set("wrapText", "bothSides")
+
+        # 添加 docPr
+        inline.append(children["docPr"])
+
+        # 添加 cNvGraphicFramePr
+        if "cNvGraphicFramePr" in children:
+            inline.append(children["cNvGraphicFramePr"])
+
+        # 添加 graphic
+        inline.append(graphic)
+
+        return True
+
+    return False
+
+
 def embed_images_in_docx(docx_path, images, tex_dir, layout_spec=None, style_spec=None):
     """Insert LaTeX figures into Word at [FIGURE_N] placeholders."""
     from docx import Document
@@ -4341,6 +4647,10 @@ def embed_images_in_docx(docx_path, images, tex_dir, layout_spec=None, style_spe
                 img_info.get("width", ""), doc.sections[0],
                 image_path=image_path, compiled_layout=compiled_layout)
             image_para.add_run().add_picture(str(image_path), width=width)
+
+            # 启用四周环绕：将wp:inline转换为wp:anchor + wrapSquare
+            _convert_inline_to_square_wrap(image_para._element)
+
         except Exception as exc:
             failed += 1
             body.remove(image_para._element)

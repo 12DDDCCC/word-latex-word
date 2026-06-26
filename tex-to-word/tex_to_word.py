@@ -70,6 +70,10 @@ def find_pandoc():
                 capture_output=True, text=True, encoding='utf-8',
                 errors='replace', timeout=10, check=False)
             return result.returncode == 0 and (result.stdout or '').lower().startswith('pandoc ')
+        except PermissionError:
+            if os.name == 'nt':
+                return _powershell_can_run(exe)
+            return False
         except Exception:
             return False
 
@@ -86,6 +90,23 @@ def find_pandoc():
         candidates.append(Path('powershell.exe'))
         return candidates
 
+    def _ps_quote(value):
+        return "'" + str(value).replace("'", "''") + "'"
+
+    def _powershell_can_run(exe):
+        script = '& ' + _ps_quote(exe) + ' --version'
+        for powershell in _powershell_candidates():
+            try:
+                result = subprocess.run(
+                    [str(powershell), '-NoProfile', '-Command', script],
+                    capture_output=True, text=True, encoding='utf-8',
+                    errors='replace', timeout=30, check=False)
+                if result.returncode == 0 and (result.stdout or '').lower().startswith('pandoc '):
+                    return True
+            except Exception:
+                pass
+        return False
+
     def _powershell_find_pandoc(root):
         if root is None:
             return None
@@ -101,7 +122,7 @@ def find_pandoc():
                 "  -ErrorAction SilentlyContinue | Sort-Object Name -Descending; "
                 "  foreach ($version in $versions) { "
                 "    $exe = Join-Path $version.FullName 'pandoc.exe'; "
-                "    if (Test-Path -LiteralPath $exe) { $exe; return } "
+                "    $exe; return "
                 "  } "
                 "} "
             )
@@ -123,7 +144,9 @@ def find_pandoc():
                     errors='replace', timeout=30, check=False)
                 source = result.stdout.strip().splitlines()
                 if source:
-                    return source[0].strip()
+                    candidate = source[0].strip()
+                    if candidate:
+                        return candidate
             except Exception:
                 pass
         return None
@@ -131,9 +154,9 @@ def find_pandoc():
     def _powershell_find_known_pandoc():
         script = (
             "$roots = @("
-            "(Join-Path $env:LOCALAPPDATA 'Microsoft\\WinGet\\Packages'), "
             "(Join-Path $env:ProgramFiles 'WinGet\\Packages'), "
-            "(Join-Path $env:ProgramFiles 'Pandoc')"
+            "(Join-Path $env:ProgramFiles 'Pandoc'), "
+            "(Join-Path $env:LOCALAPPDATA 'Microsoft\\WinGet\\Packages')"
             "); "
             "foreach ($root in $roots) { "
             "  if (-not (Test-Path -LiteralPath $root)) { continue } "
@@ -144,7 +167,7 @@ def find_pandoc():
             "    -ErrorAction SilentlyContinue | Sort-Object Name -Descending; "
             "    foreach ($version in $versions) { "
             "      $exe = Join-Path $version.FullName 'pandoc.exe'; "
-            "      if (Test-Path -LiteralPath $exe) { $exe; return } "
+            "      $exe; return "
             "    } "
             "  } "
             "  $direct = Join-Path $root 'pandoc.exe'; "
@@ -159,7 +182,9 @@ def find_pandoc():
                     errors='replace', timeout=30, check=False)
                 source = result.stdout.strip().splitlines()
                 if source:
-                    return source[0].strip()
+                    candidate = source[0].strip()
+                    if candidate:
+                        return candidate
             except Exception:
                 pass
         return None
@@ -171,12 +196,22 @@ def find_pandoc():
             return None
         if not root.is_dir():
             return None
+        root_text = str(root).lower()
+        is_winget_packages = 'winget' in root_text and 'packages' in root_text
         names = {'pandoc.exe', 'pandoc.EXE', 'Pandoc.exe'}
         for dirpath, dirnames, filenames in os.walk(root, onerror=lambda exc: None):
             for filename in filenames:
                 if filename in names or filename.lower() == 'pandoc.exe':
                     candidate = Path(dirpath) / filename
-                    if _usable(candidate) or candidate.exists():
+                    if _usable(candidate):
+                        return str(candidate)
+                    if is_winget_packages:
+                        return str(candidate)
+                    try:
+                        exists = candidate.exists()
+                    except OSError:
+                        exists = False
+                    if exists:
                         return str(candidate)
         return None
 
@@ -193,10 +228,13 @@ def find_pandoc():
                 ['where.exe', 'pandoc'],
                 capture_output=True, text=True, encoding='utf-8',
                 errors='replace', timeout=10, check=False)
-            for line in result.stdout.splitlines():
-                candidate = line.strip()
-                if candidate and _usable(candidate):
-                    return candidate
+            candidates = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            candidates.sort(key=lambda item: (
+                'appdata\\local' in item.lower(),
+                'program files' not in item.lower(),
+            ))
+            if candidates:
+                return candidates[0]
         except Exception:
             pass
     path_entries = [
@@ -217,9 +255,6 @@ def find_pandoc():
             if _usable(candidate) or exists:
                 return str(candidate)
     if os.name == 'nt':
-        known_pandoc = _powershell_find_known_pandoc()
-        if known_pandoc:
-            return known_pandoc
         for powershell in _powershell_candidates():
             try:
                 result = subprocess.run(
@@ -234,18 +269,21 @@ def find_pandoc():
                     return source
             except Exception:
                 pass
+        known_pandoc = _powershell_find_known_pandoc()
+        if known_pandoc:
+            return known_pandoc
         try:
             home = Path.home()
         except RuntimeError:
             home = None
         roots = [
             _env_path('ProgramFiles', 'Pandoc'),
-            _env_path('LOCALAPPDATA', 'Microsoft', 'WinGet', 'Packages'),
             _env_path('ProgramFiles', 'WinGet', 'Packages'),
+            _env_path('LOCALAPPDATA', 'Microsoft', 'WinGet', 'Packages'),
             Path(__file__).resolve().parents[2] / 'test' / '_tmp' / 'tools' / 'pandoc',
         ]
         if home:
-            roots[1:1] = [
+            roots[3:3] = [
                 home / 'AppData' / 'Local' / 'Microsoft' / 'WinGet' / 'Packages',
             ]
         for root in (root for root in roots if root is not None):
@@ -257,17 +295,29 @@ def find_pandoc():
                 return found
         userprofile = os.environ.get('USERPROFILE')
         fallback_roots = []
+        program_files = os.environ.get('ProgramFiles') or r'C:\Program Files'
+        fallback_roots.append(Path(program_files) / 'WinGet' / 'Packages')
         if userprofile:
             fallback_roots.append(
                 Path(userprofile) / 'AppData' / 'Local' / 'Microsoft' / 'WinGet' / 'Packages'
             )
-        program_files = os.environ.get('ProgramFiles') or r'C:\Program Files'
-        fallback_roots.append(Path(program_files) / 'WinGet' / 'Packages')
         package = 'JohnMacFarlane.Pandoc_Microsoft.Winget.Source_8wekyb3d8bbwe'
         for root in fallback_roots:
             for version in ('pandoc-3.10', 'pandoc-3.9.0.2', 'pandoc-3.9', 'pandoc-3.8'):
                 candidate = root / package / version / 'pandoc.exe'
-                return str(candidate)
+                if _usable(candidate):
+                    return str(candidate)
+        for root in fallback_roots:
+            try:
+                root = Path(root)
+                if not root.is_dir():
+                    continue
+                for dirpath, dirnames, filenames in os.walk(root, onerror=lambda exc: None):
+                    for filename in filenames:
+                        if filename.lower() == 'pandoc.exe':
+                            return str(Path(dirpath) / filename)
+            except Exception:
+                pass
     raise RuntimeError('Pandoc executable not found')
 
 
@@ -293,35 +343,7 @@ def _run_pandoc_subprocess(cmd):
         def _ps_quote(value):
             return "'" + str(value).replace("'", "''") + "'"
 
-        find_script = (
-            "$pandoc = $null; "
-            "$roots = @("
-            "(Join-Path $env:LOCALAPPDATA 'Microsoft\\WinGet\\Packages'), "
-            "(Join-Path $env:ProgramFiles 'WinGet\\Packages'), "
-            "(Join-Path $env:ProgramFiles 'Pandoc')"
-            "); "
-            "foreach ($root in $roots) { "
-            "  if ($pandoc) { break } "
-            "  if (-not (Test-Path -LiteralPath $root)) { continue } "
-            "  $packages = Get-ChildItem -LiteralPath $root -Directory -Filter 'JohnMacFarlane.Pandoc*' "
-            "  -ErrorAction SilentlyContinue; "
-            "  foreach ($package in $packages) { "
-            "    if ($pandoc) { break } "
-            "    $versions = Get-ChildItem -LiteralPath $package.FullName -Directory -Filter 'pandoc-*' "
-            "    -ErrorAction SilentlyContinue | Sort-Object Name -Descending; "
-            "    foreach ($version in $versions) { "
-            "      $exe = Join-Path $version.FullName 'pandoc.exe'; "
-            "      if (Test-Path -LiteralPath $exe) { $pandoc = $exe; break } "
-            "    } "
-            "  } "
-            "  if (-not $pandoc) { "
-            "    $direct = Join-Path $root 'pandoc.exe'; "
-            "    if (Test-Path -LiteralPath $direct) { $pandoc = $direct } "
-            "  } "
-            "} "
-            "if (-not $pandoc) { $pandoc = " + _ps_quote(cmd[0]) + " }; "
-        )
-        ps_cmd = find_script + '& $pandoc'
+        ps_cmd = '& ' + _ps_quote(cmd[0])
         if len(cmd) > 1:
             ps_cmd += ' ' + ' '.join(_ps_quote(part) for part in cmd[1:])
         return subprocess.run(
@@ -379,7 +401,8 @@ def tex_to_word(
     tex_path = os.path.abspath(tex_path)
     tex_dir = os.path.dirname(tex_path)
     if use_pdf_float_wrap is None:
-        use_pdf_float_wrap = str(config_mode or '').lower() == 'final'
+        # 修改：所有模式都启用四周环绕，避免图片独占一页导致空白
+        use_pdf_float_wrap = True
 
     if output_path is None:
         base = os.path.splitext(os.path.basename(tex_path))[0]

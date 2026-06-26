@@ -181,6 +181,21 @@ class TemplateExtractLite(_GuideMixin):
             body = mt.group(1)
             if BS + r'and' in body or BS + r'authormark' in body:
                 info['author_separator'] = r'\and'
+
+        # 检测是否支持多个作者（每个作者单独一个\author{}命令）
+        # NSR模板特征：多次调用\author命令
+        # 匹配 \author{ 或 \def\author 或 \newcommand{\author}
+        author_patterns = [
+            BS + r'author\s*\{',           # \author{
+            BS + r'def\s*' + BS + r'author',  # \def\author
+            BS + r'newcommand\{' + BS + r'author\}',  # \newcommand{\author}
+        ]
+        author_count = 0
+        for pattern in author_patterns:
+            author_count += len(re.findall(pattern, self.content))
+        if author_count > 1:
+            info['multiple_authors'] = True
+
         return info
 
     # ─── 5. 摘要格式 ────────────────────────────────────

@@ -267,6 +267,23 @@ def postprocess_tex(tex_content, layout_spec=None):
     tex_content = _restore_identifier_subscripts(tex_content)
     tex_content = _normalize_escaped_chemical_subscripts(tex_content)
 
+    # 0. 上标编号+文本：$ ^{N}\mathrm{text} $ → \textsuperscript{N} text
+    # Word中上标编号常被包装在oMath里，连带后面的文本一起进入数学模式，
+    # 导致字体变成Cambria Math。这里检测并转回文本模式。
+    # 匹配模式：$ ^{数字}\mathrm{纯文本} $（纯文本不含数学符号）
+    def _fix_sup_affil(m):
+        num = m.group(1)
+        text = m.group(2)
+        # 不strip：保留尾部空格（避免与后续文本粘连，如 FrontiersScience）
+        if text and not text[0].isspace():
+            return f'\\textsuperscript{{{num}}} {text}'
+        return f'\\textsuperscript{{{num}}}{text}'
+    tex_content = _re.sub(
+        r'\$\s*\^\{(\d+)\}\s*\\mathrm\{([^}]*?)\}\s*\$',
+        _fix_sup_affil,
+        tex_content
+    )
+
     # 1. CO2 → CO$_2$（但保留已有的 CO$_2$、CO\textsubscript{2}、CO_{2}）
     # 只匹配独立的 CO2（后面不跟字母，避免误匹配 GCASv2 等）
     tex_content = _re.sub(

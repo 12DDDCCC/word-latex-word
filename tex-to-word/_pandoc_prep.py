@@ -40,12 +40,26 @@ def _strip_pandoc_unsupported_layout_primitives(content):
 
 
 def _author_to_latex(match):
-    r"""将\Author[email]{FirstName}{Surname}转为\author{FirstName Surname}"""
+    r"""将\Author[email]{FirstName}{Surname}转为\author{FirstName Surname}
+
+    Copernicus格式: \Author[affil][email]{given}{surname}
+    或多个作者在同一行: \Author[][EMAIL]{aa $..$,Fb $..$,Li $..$}{}
+    """
     whole = match.group(0)
     names = re.findall(r'\{([^{}]*)\}', whole)
     if len(names) >= 2:
-        first, last = names[-2], names[-1]
-        return f'\\author{{{first} {last}}}'
+        # 最后一个花括号通常是surname（可能是空的{}）
+        # 倒数第二个是given names（可能包含多个作者用逗号分隔）
+        given_part = names[-2].strip()
+        last_part = names[-1].strip()
+        if given_part and last_part:
+            return f'\\author{{{given_part} {last_part}}}'
+        elif given_part:
+            return f'\\author{{{given_part}}}'
+        elif last_part:
+            return f'\\author{{{last_part}}}'
+    elif len(names) == 1:
+        return f'\\author{{{names[0]}}}'
     return f'\\author{{}}'
 
 
@@ -563,6 +577,7 @@ def prepare_tex_for_pandoc(tex_path, work_dir, bbl_path=None):
         (r'\\Author(?:\[[^\]]*\]){0,2}\{[^}]*\}\{[^}]*\}', _author_to_latex),
         (r'\\affil\[(.*?)\]\{(.*?)\}', r'% \\affil[\1]{\2}'),
         (r'\\affil\{(.*?)\}', r'% \\affil{\1}'),
+        (r'^\\affiliation(?:\[[^\]]*\])?\{.*\}', lambda match: '% ' + match.group(0)),
         (r'^\\runningtitle\{', r'% \\runningtitle{'),
         (r'^\\runningauthor\{', r'% \\runningauthor{'),
         (r'^\\received\{', r'% \\received{'),

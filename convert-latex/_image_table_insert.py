@@ -126,6 +126,9 @@ def _max_float_body_height_mm(layout_spec, width_command=None, aspect_ratio=None
     现有上限截断时(textwidth > height上限),把上限提升到 textwidth 让宽度
     能铺满(接受多 1 页代价,图更完整)。传 None(无图片信息)时走原逻辑,
     保持向后兼容。
+
+    兜底优化: 为避免图片独占一页导致大量空白，严格限制图片高度。
+    对于正方形/纵向图，限制在页面高度的60%以内，确保图片和正文能放在同一页。
     """
     page_spec = (layout_spec or {}).get('page_geometry', {}) if layout_spec else {}
     doc_spec = (layout_spec or {}).get('document', {}) if layout_spec else {}
@@ -152,6 +155,15 @@ def _max_float_body_height_mm(layout_spec, width_command=None, aspect_ratio=None
         target_w = _target_graphic_width_mm(width_command, layout_spec)
         if target_w and target_w > height_limit:
             height_limit = target_w
+
+    # 兜底优化: 对于正方形/纵向图，严格限制图片高度不超过页面文本高度的60%
+    # 避免图片独占一页导致大量空白
+    # 对于ACP模板(textheight=206mm)，60%约124mm，确保图片和正文能放在同一页
+    if aspect_ratio is not None and aspect_ratio <= 1.3:
+        max_allowed_height = textheight_mm * 0.60
+        if height_limit > max_allowed_height:
+            height_limit = max_allowed_height
+
     return max(20.0, height_limit)
 
 

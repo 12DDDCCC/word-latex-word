@@ -1071,6 +1071,114 @@ def test_assembly_does_not_force_final_float_only_page():
     assert "body_lines.append('\\\\FloatBarrier')" not in bibliography_block
 
 
+def test_metadata_author_mathrm_superscripts_do_not_corrupt_author_command():
+    title_para = {
+        'text': 'Title',
+        'latex': 'Title',
+        'semantic_type': 'title',
+        'para_index': 0,
+    }
+    author_para = {
+        'text': 'aa b,Fb J',
+        'latex': r'aa $ \mathrm{b}^{1} $,Fb $ \mathrm{J}^{1,2,3} $',
+        'semantic_type': 'author',
+        'para_index': 1,
+    }
+
+    result = assemble_tex_module._assemble_metadata(
+        r'\begin{document}' + '\n' + r'\maketitle' + '\n' + r'\end{document}',
+        {'metadata_block': '', 'spec': {}, 'journal': 'elsarticle'},
+        '',
+        [title_para, author_para],
+        title_para,
+        [author_para],
+        [],
+        {},
+        {},
+        {},
+    )
+
+    author_lines = [line for line in result.splitlines() if line.startswith(r'\author{')]
+    assert author_lines == [r'\author{aa b$^{1}$,Fb J$^{1,2,3}$}']
+    assert r'\author{aa $ \mathrm{b}^{1} $,Fb $ \mathrm{J}^{1,2,3} $}^{1}' not in result
+
+
+def test_metadata_affiliation_commands_follow_journal_templates():
+    title_para = {'text': 'Title', 'latex': 'Title', 'semantic_type': 'title', 'para_index': 0}
+    author_para = {'text': 'Author', 'latex': r'Author$^{1}$', 'semantic_type': 'author', 'para_index': 1}
+    affil_para = {
+        'text': 'Jiangsu Provincial Key Laboratory, China',
+        'latex': r'$ ^{1}\mathrm{Jiangsu} $ Provincial Key Laboratory, China',
+        'semantic_type': 'affiliation',
+        'para_index': 2,
+    }
+    base_tex = r'\begin{document}' + '\n' + r'\maketitle' + '\n' + r'\end{document}'
+
+    els = assemble_tex_module._assemble_metadata(
+        base_tex,
+        {'metadata_block': '', 'spec': {'document_class': {'class_name': 'elsarticle'}}, 'journal': 'elsarticle'},
+        '',
+        [title_para, author_para, affil_para],
+        title_para,
+        [author_para],
+        [affil_para],
+        {},
+        {},
+        {},
+    )
+    nsr = assemble_tex_module._assemble_metadata(
+        base_tex,
+        {'metadata_block': '', 'spec': {'document_class': {'class_name': 'nsr'}}, 'journal': 'nsr'},
+        '',
+        [title_para, author_para, affil_para],
+        title_para,
+        [author_para],
+        [affil_para],
+        {},
+        {},
+        {},
+    )
+
+    assert r'\affiliation[1]{organization={Jiangsu Provincial Key Laboratory, China}}' in els
+    assert r'\affil[]{' not in els
+    assert r'\affil{$^{1}$Jiangsu Provincial Key Laboratory, China}' in nsr
+    assert r'\affil[]{' not in nsr
+
+
+def test_restored_affiliations_follow_title_author_order():
+    from docx import Document
+    from docx.enum.style import WD_STYLE_TYPE
+
+    doc = Document()
+    doc.styles.add_style('Author', WD_STYLE_TYPE.PARAGRAPH)
+    doc.add_paragraph('Title').style = 'Title'
+    doc.add_paragraph('Author').style = 'Author'
+    doc.add_paragraph('Abstract. Body')
+    heading = doc.add_paragraph('1 Introduction')
+    heading.style = 'Heading 1'
+
+    tex = '\n'.join([
+        r'\title{Title}',
+        r'\author{Author}',
+        r'\affiliation[1]{organization={Jiangsu Provincial Key Laboratory, China}}',
+        r'\affil{$^{2}$Jiangsu China}',
+        r'\affil{$^{3}$Frontiers Science Center, China}',
+    ])
+
+    docx_insert_module._restore_title_author_affil(doc, tex)
+
+    texts = [p.text for p in doc.paragraphs[:7]]
+    assert texts[:6] == [
+        'Title',
+        'Author',
+        '1 Jiangsu Provincial Key Laboratory, China',
+        '2 Jiangsu China',
+        '3 Frontiers Science Center, China',
+        'Abstract. Body',
+    ]
+    assert all('[]' not in text and ']1' not in text for text in texts)
+
+
 def test_elsarticle_manuscript_twocolumn_normalizes_to_3p():
     spec = {
         'document_class': {
